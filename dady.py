@@ -9,6 +9,7 @@ import queue
 import re
 import requests
 import json
+import os
 
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -131,16 +132,16 @@ def register_account(email, password, proxy):
             options.add_argument(f"--proxy-server={proxy}")
             logger.info(f"Используется прокси: {proxy}")
 
-        # Новый способ инициализации драйвера
+        # Используем системный chromedriver
         try:
-            from webdriver_manager.chrome import ChromeDriverManager
-            service = Service(ChromeDriverManager().install())
+            service = Service("/usr/bin/chromedriver")
             driver = webdriver.Chrome(
                 service=service,
                 options=options
             )
-        except ImportError:
-            driver = webdriver.Chrome(options=options)
+        except Exception as e:
+            logger.error(f"Ошибка запуска chromedriver: {e}")
+            return False
 
         driver.execute_script(
             "Object.defineProperty(navigator, 'webdriver', "
