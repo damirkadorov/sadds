@@ -15,6 +15,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import NoSuchElementException
+from selenium.webdriver.chrome.service import Service
 
 # ===== НАСТРОЙКИ =====
 TARGET_DOMAIN = "auth.openai.com"
@@ -130,11 +131,13 @@ def register_account(email, password, proxy):
             options.add_argument(f"--proxy-server={proxy}")
             logger.info(f"Используется прокси: {proxy}")
 
+        # Новый способ инициализации драйвера
         try:
             from webdriver_manager.chrome import ChromeDriverManager
-            driver_path = ChromeDriverManager().install()
+            service = Service(ChromeDriverManager().install())
             driver = webdriver.Chrome(
-                executable_path=driver_path, options=options
+                service=service,
+                options=options
             )
         except ImportError:
             driver = webdriver.Chrome(options=options)
