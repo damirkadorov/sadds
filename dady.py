@@ -2,8 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-Авторегистрация аккаунтов на chatgpt.com через Chromium.
-Использует API Firstmail для получения кода подтверждения.
+Авторегистрация/автовход на chatgpt.com через Chromium с прокси и API Firstmail.
 """
 
 import sys
@@ -14,24 +13,25 @@ import queue
 import re
 import requests
 import json
+import os
 
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import NoSuchElementException, TimeoutException
+from selenium.common.exceptions import TimeoutException, NoSuchElementException
 from selenium.webdriver.chrome.service import Service
 
-# ===================== НАСТРОЙКИ (измените здесь) =====================
-EMAILS_FILE = "emails.txt"          # Файл с email:пароль
+# ===================== НАСТРОЙКИ =====================
+EMAILS_FILE = "emails.txt"          # Файл с email:пароль (каждая строка)
 OUTPUT_FILE = "accounts.txt"        # Куда сохранять успешные аккаунты
 PROXIES_FILE = "proxy.txt"          # Файл с прокси (по одному на строку)
 API_TOKEN = "kv3wxML6Ibxo2ok1SPJCVonQIM09TWDgqjf0_S3BcVWIfvZVx9XlqcioEKn6qiXt"
 API_URL = "https://firstmail.ltd/api/v1/email/messages"
-THREADS = 1                         # Количество потоков (1 = последовательно)
+THREADS = 1                         # Количество потоков
 DELAY = 5                           # Задержка между регистрациями (сек)
-HEADLESS = False                    # Запускать браузер без окна (True/False)
-# ======================================================================
+HEADLESS = False                    # True = без окна браузера
+# =====================================================
 
 # Настройка логирования
 logging.basicConfig(
@@ -98,8 +98,19 @@ def get_verification_code_api(email_address, email_password, sender_domain="tm.o
     return None
 
 
+def save_debug_info(driver, prefix):
+    """Сохраняет скриншот и HTML для отладки."""
+    try:
+        driver.save_screenshot(f"{prefix}_screenshot.png")
+        with open(f"{prefix}_page.html", "w", encoding="utf-8") as f:
+            f.write(driver.page_source)
+        logger.info(f"Отладочные файлы сохранены: {prefix}_screenshot.png и {prefix}_page.html")
+    except Exception as e:
+        logger.warning(f"Не удалось сохранить отладочные файлы: {e}")
+
+
 def register_account(email, password, proxy):
-    """Регистрирует один аккаунт на chatgpt.com."""
+    """Регистрирует или входит в аккаунт на chatgpt.com."""
     driver = None
     try:
         options = webdriver.ChromeOptions()
@@ -114,7 +125,6 @@ def register_account(email, password, proxy):
             options.add_argument(f"--proxy-server={proxy}")
             logger.info(f"Используется прокси: {proxy}")
 
-        # Используем системный chromedriver (установленный через apt)
         service = Service("/usr/bin/chromedriver")
         driver = webdriver.Chrome(service=service, options=options)
 
@@ -123,107 +133,153 @@ def register_account(email, password, proxy):
             "{get: () => undefined})"
         )
 
-        # Шаг 1: открыть chatgpt.com
+        # 1. Открыть chatgpt.com
         driver.get("https://chatgpt.com")
         logger.info("Открыта страница chatgpt.com")
-        wait = WebDriverWait(driver, 15)
+        wait = WebDriverWait(driver, 20)
 
-        # Шаг 2: нажать кнопку "Зарегистрироваться бесплатно" (Sign up)
-        # Пробуем разные варианты
-        signup_buttons = [
-            "//button[contains(text(), 'Sign up')]",
-            "//button[contains(text(), 'Зарегистрироваться')]",
-            "//a[contains(text(), 'Sign up')]",
-            "//a[contains(text(), 'Зарегистрироваться')]",
-            "//button[@data-testid='signup-button']",
-            "//button[contains(@class, 'btn-primary') and contains(text(), 'Sign up')]"
+        # 2. Нажать "Log in"
+        login_clicked = False
+        login_xpaths = [
+            "//button[contains(text(), 'Log in')]",
+            "//button[contains(text(), 'Войти')]",
+            "//a[contains(text(), 'Log in')]",
+            "//a[contains(text(), 'Войти')]",
+            "//button[@data-testid='login-button']",
+            "//div[@role='button' and contains(text(), 'Log in')]"
         ]
-        clicked = False
-        for xp in signup_buttons:
+        for xp in login_xpaths:
             try:
                 btn = driver.find_element(By.XPATH, xp)
                 if btn.is_displayed() and btn.is_enabled():
                     btn.click()
-                    logger.info("Нажата кнопка регистрации")
-                    clicked = True
+                    logger.info("Нажата кнопка Log in")
+                    login_clicked = True
                     break
             except:
-                pass
-        if not clicked:
-            # Если не нашли кнопку, возможно, она уже на странице входа
-            logger.warning("Кнопка регистрации не найдена, возможно, уже на странице ввода email")
-            pass
+                continue
+
+        if not login_clicked:
+            logger.warning("Не найдена кнопка Log in, пробуем искать форму напрямую")
+            # Возможно, форма уже открыта
 
         time.sleep(2)
 
-        # Шаг 3: ввод email
-        email_field = wait.until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "input[name='email']"))
-        )
+        # 3. Проверить, открылась ли форма email
+        try:
+            email_field = wait.until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, "input[name='email']"))
+            )
+        except TimeoutException:
+            logger.error("Поле email не появилось")
+            save_debug_info(driver, "debug_no_email_field")
+            return False
+
+        # 4. Ввести email
         email_field.clear()
         email_field.send_keys(email)
         logger.info(f"Email {email} введён")
 
-        # Шаг 4: нажать "Continue" (первая кнопка)
+        # 5. Нажать "Continue" (первая кнопка отправки)
         continue_btn = wait.until(
             EC.element_to_be_clickable((By.CSS_SELECTOR, "button[type='submit']"))
         )
         continue_btn.click()
         logger.info("Нажата кнопка Continue (email)")
 
-        # Шаг 5: ожидание поля пароля
-        password_field = wait.until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "input[name='password']"))
-        )
+        # 6. Проверить, не попали ли мы на страницу с ошибкой "email уже зарегистрирован"
+        try:
+            error_msg = driver.find_element(By.XPATH, "//div[contains(text(), 'already registered')]")
+            if error_msg.is_displayed():
+                logger.info(f"Email {email} уже зарегистрирован, выполняется вход")
+                # В этом случае форма пароля уже должна появиться, просто вводим пароль
+                password_field = wait.until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, "input[name='password']"))
+                )
+                password_field.clear()
+                password_field.send_keys(password)
+                continue_btn2 = wait.until(
+                    EC.element_to_be_clickable((By.CSS_SELECTOR, "button[type='submit']"))
+                )
+                continue_btn2.click()
+                logger.info("Нажата кнопка Continue (пароль) — выполнен вход")
+                time.sleep(3)
+                # Сохраняем аккаунт
+                with open(OUTPUT_FILE, "a", encoding="utf-8") as f:
+                    f.write(f"{email}:{password}\n")
+                logger.info(f"Аккаунт {email} успешно авторизован и сохранён")
+                return True
+        except:
+            pass
+
+        # 7. Если ошибки нет — это регистрация, ждём поле пароля
+        try:
+            password_field = wait.until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, "input[name='password']"))
+            )
+        except TimeoutException:
+            logger.error("Поле пароля не появилось")
+            save_debug_info(driver, "debug_no_password_field")
+            return False
+
         password_field.clear()
         password_field.send_keys(password)
         logger.info("Пароль введён")
 
-        # Шаг 6: нажать "Continue" (пароль)
+        # 8. Нажать "Continue" после пароля
         continue_btn2 = wait.until(
             EC.element_to_be_clickable((By.CSS_SELECTOR, "button[type='submit']"))
         )
         continue_btn2.click()
         logger.info("Нажата кнопка Continue (пароль)")
 
-        # Шаг 7: ожидание поля для кода
-        code_field = wait.until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "input[name='code']"))
-        )
+        # 9. Ждём поле для кода
+        try:
+            code_field = wait.until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, "input[name='code']"))
+            )
+        except TimeoutException:
+            logger.error("Поле для кода не появилось")
+            save_debug_info(driver, "debug_no_code_field")
+            return False
+
         logger.info("Поле для кода появилось")
 
-        # Шаг 8: получить код через API
+        # 10. Получить код через API
         code = get_verification_code_api(email, password, sender_domain="tm.openai.com", timeout=120)
         if not code:
             logger.error(f"Не удалось получить код для {email}")
             return False
 
-        # Шаг 9: ввести код
+        # 11. Ввести код
         code_field.clear()
         code_field.send_keys(code)
         logger.info(f"Код {code} введён")
 
-        # Шаг 10: нажать "Continue" (код)
+        # 12. Нажать "Continue" после кода
         continue_btn3 = wait.until(
             EC.element_to_be_clickable((By.CSS_SELECTOR, "button[type='submit']"))
         )
         continue_btn3.click()
         logger.info("Нажата кнопка Continue (код)")
 
-        # Небольшая пауза для завершения регистрации
         time.sleep(3)
 
         # Сохраняем успешный аккаунт
         with open(OUTPUT_FILE, "a", encoding="utf-8") as f:
             f.write(f"{email}:{password}\n")
-        logger.info(f"Аккаунт {email} успешно сохранён в {OUTPUT_FILE}")
+        logger.info(f"Аккаунт {email} успешно зарегистрирован и сохранён в {OUTPUT_FILE}")
         return True
 
     except TimeoutException as e:
-        logger.error(f"Таймаут при регистрации {email}: {e}")
+        logger.error(f"Таймаут при обработке {email}: {e}")
+        if driver:
+            save_debug_info(driver, f"debug_timeout_{email.replace('@', '_')}")
         return False
     except Exception as e:
         logger.error(f"Ошибка при регистрации {email}: {e}")
+        if driver:
+            save_debug_info(driver, f"debug_error_{email.replace('@', '_')}")
         return False
     finally:
         if driver:
@@ -288,9 +344,9 @@ def main():
             logger.info(f"Обработка {email} с прокси {proxy}")
             success = register_account(email, pwd, proxy)
             if success:
-                logger.info(f"Успешно зарегистрирован {email}")
+                logger.info(f"Успешно обработан {email}")
             else:
-                logger.error(f"Не удалось зарегистрировать {email}")
+                logger.error(f"Не удалось обработать {email}")
             if DELAY > 0:
                 time.sleep(DELAY)
             tasks.task_done()
