@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+"""
+Авторегистрация/автовход на chatgpt.com через Chromium с поддержкой HTTP/HTTPS прокси.
+При появлении капчи останавливается и ждёт ручного решения.
+Использует API Firstmail для получения кода.
+"""
+
 import sys
 import time
 import logging
@@ -10,8 +16,6 @@ import re
 import requests
 import json
 import os
-import tempfile
-import zipfile
 
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -21,9 +25,9 @@ from selenium.common.exceptions import TimeoutException, NoSuchElementException
 from selenium.webdriver.chrome.service import Service
 
 # ===================== НАСТРОЙКИ =====================
-EMAILS_FILE = "emails.txt"
-OUTPUT_FILE = "accounts.txt"
-PROXIES_FILE = "proxy.txt"
+EMAILS_FILE = "emails.txt"          # email:пароль (каждая строка)
+OUTPUT_FILE = "accounts.txt"        # успешные аккаунты
+PROXIES_FILE = "proxy.txt"          # HTTP/HTTPS прокси, формат: http://user:pass@host:port
 API_TOKEN = "kv3wxML6Ibxo2ok1SPJCVonQIM09TWDgqjf0_S3BcVWIfvZVx9XlqcioEKn6qiXt"
 API_URL = "https://firstmail.ltd/api/v1/email/messages"
 THREADS = 1
@@ -39,77 +43,8 @@ logging.basicConfig(
 logger = logging.getLogger("AutoRegister")
 
 
-def create_proxy_extension(proxy_string):
-    """Создаёт расширение для SOCKS5 с авторизацией. Возвращает путь к каталогу или None."""
-    if not proxy_string.startswith('socks5://'):
-        return None
-
-    rest = proxy_string[8:]
-    if '@' not in rest:
-        # Нет авторизации, можно использовать --proxy-server напрямую
-        return None
-
-    try:
-        auth, host_port = rest.split('@', 1)
-        user, pwd = auth.split(':', 1)
-        if ':' in host_port:
-            host, port = host_port.split(':', 1)
-        else:
-            host = host_port
-            port = '1080'
-
-        extension_dir = tempfile.mkdtemp()
-
-        manifest = {
-            "version": "1.0.0",
-            "manifest_version": 2,
-            "name": "Chrome Proxy",
-            "permissions": [
-                "proxy", "tabs", "unlimitedStorage", "storage",
-                "<all_urls>", "webRequest", "webRequestBlocking"
-            ],
-            "background": {"scripts": ["background.js"]},
-            "minimum_chrome_version": "22.0.0"
-        }
-        with open(os.path.join(extension_dir, "manifest.json"), "w") as f:
-            json.dump(manifest, f)
-
-        bg_js = f"""
-        var config = {{
-            mode: "fixed_servers",
-            rules: {{
-                singleProxy: {{
-                    scheme: "socks5",
-                    host: "{host}",
-                    port: parseInt({port})
-                }},
-                bypassList: ["localhost"]
-            }}
-        }};
-        chrome.proxy.settings.set({{value: config, scope: "regular"}}, function() {{}});
-        chrome.webRequest.onAuthRequired.addListener(
-            function(details) {{
-                return {{
-                    authCredentials: {{
-                        username: "{user}",
-                        password: "{pwd}"
-                    }}
-                }};
-            }},
-            {{urls: ["<all_urls>"]}},
-            ['blocking']
-        );
-        """
-        with open(os.path.join(extension_dir, "background.js"), "w") as f:
-            f.write(bg_js)
-
-        return extension_dir
-    except Exception as e:
-        logger.warning(f"Не удалось создать расширение для прокси {proxy_string}: {e}")
-        return None
-
-
 def get_verification_code_api(email_address, email_password, sender_domain="tm.openai.com", timeout=120):
+    """Получает код через API Firstmail."""
     headers = {
         "Authorization": f"Bearer {API_TOKEN}",
         "Content-Type": "application/json"
@@ -165,6 +100,7 @@ def get_verification_code_api(email_address, email_password, sender_domain="tm.o
 
 
 def save_debug_info(driver, prefix):
+    """Сохраняет скриншот и HTML при ошибке."""
     try:
         driver.save_screenshot(f"{prefix}_screenshot.png")
         with open(f"{prefix}_page.html", "w", encoding="utf-8") as f:
@@ -174,9 +110,42 @@ def save_debug_info(driver, prefix):
         logger.warning(f"Не удалось сохранить отладочные файлы: {e}")
 
 
+def wait_for_captcha(driver):
+    """Проверяет наличие капчи и ждёт её ручного решения."""
+    try:
+        # Ищем характерные элементы капчи (можно дополнить)
+        captcha_indicators = [
+            "//iframe[contains(@src, 'recaptcha')]",
+            "//div[@class='g-recaptcha']",
+            "//div[contains(@class, 'captcha')]",
+            "//div[contains(text(), 'captcha')]",
+            "//div[contains(text(), 'проверка')]"
+        ]
+        for xp in captcha_indicators:
+            try:
+                elem = driver.find_element(By.XPATH, xp)
+                if elem.is_displayed():
+                    logger.warning("Обнаружена капча! Пожалуйста, решите её вручную в открытом браузере.")
+                    # Ждём, пока капча исчезнет (пользователь решит)
+                    while True:
+                        try:
+                            if not elem.is_displayed():
+                                break
+                        except:
+                            break
+                        time.sleep(2)
+                    logger.info("Капча решена, продолжаем...")
+                    return True
+            except:
+                continue
+    except:
+        pass
+    return False
+
+
 def register_account(email, password, proxy):
+    """Регистрирует или входит в аккаунт."""
     driver = None
-    proxy_extension_dir = None
     try:
         options = webdriver.ChromeOptions()
         options.add_argument("--disable-blink-features=AutomationControlled")
@@ -186,21 +155,10 @@ def register_account(email, password, proxy):
             options.add_argument("--headless")
             options.add_argument("--no-sandbox")
             options.add_argument("--disable-dev-shm-usage")
-
-        # Обработка прокси
         if proxy:
-            # Попробуем создать расширение для SOCKS5 с авторизацией
-            proxy_extension_dir = create_proxy_extension(proxy)
-            if proxy_extension_dir:
-                options.add_argument(f"--load-extension={proxy_extension_dir}")
-                logger.info(f"Используется SOCKS5 прокси с авторизацией (расширение)")
-            elif proxy.startswith('socks5://') and '@' in proxy:
-                # SOCKS5 с авторизацией, но расширение не создалось — пропускаем
-                logger.error(f"Не удалось настроить SOCKS5 прокси с авторизацией: {proxy}. Прокси не используется.")
-            else:
-                # HTTP/HTTPS/SOCKS5 без авторизации
-                options.add_argument(f"--proxy-server={proxy}")
-                logger.info(f"Используется прокси (стандартный метод): {proxy}")
+            # Только HTTP/HTTPS прокси
+            options.add_argument(f"--proxy-server={proxy}")
+            logger.info(f"Используется прокси: {proxy}")
 
         service = Service("/usr/bin/chromedriver")
         driver = webdriver.Chrome(service=service, options=options)
@@ -213,6 +171,9 @@ def register_account(email, password, proxy):
         driver.get("https://chatgpt.com")
         logger.info("Открыта страница chatgpt.com")
         wait = WebDriverWait(driver, 20)
+
+        # Проверка капчи на начальной странице
+        wait_for_captcha(driver)
 
         # Нажать "Log in"
         login_clicked = False
@@ -252,11 +213,17 @@ def register_account(email, password, proxy):
         email_field.send_keys(email)
         logger.info(f"Email {email} введён")
 
+        # Проверка капчи после ввода email
+        wait_for_captcha(driver)
+
         continue_btn = wait.until(
             EC.element_to_be_clickable((By.CSS_SELECTOR, "button[type='submit']"))
         )
         continue_btn.click()
         logger.info("Нажата кнопка Continue (email)")
+
+        # Проверка капчи после нажатия
+        wait_for_captcha(driver)
 
         # Проверка на уже зарегистрированный email
         try:
@@ -268,6 +235,7 @@ def register_account(email, password, proxy):
                 )
                 password_field.clear()
                 password_field.send_keys(password)
+                wait_for_captcha(driver)
                 continue_btn2 = wait.until(
                     EC.element_to_be_clickable((By.CSS_SELECTOR, "button[type='submit']"))
                 )
@@ -288,17 +256,23 @@ def register_account(email, password, proxy):
         password_field.send_keys(password)
         logger.info("Пароль введён")
 
+        wait_for_captcha(driver)
+
         continue_btn2 = wait.until(
             EC.element_to_be_clickable((By.CSS_SELECTOR, "button[type='submit']"))
         )
         continue_btn2.click()
         logger.info("Нажата кнопка Continue (пароль)")
 
+        # Проверка капчи перед кодом
+        wait_for_captcha(driver)
+
         code_field = wait.until(
             EC.presence_of_element_located((By.CSS_SELECTOR, "input[name='code']"))
         )
         logger.info("Поле для кода появилось")
 
+        # Получаем код из API
         code = get_verification_code_api(email, password, sender_domain="tm.openai.com", timeout=120)
         if not code:
             logger.error(f"Не удалось получить код для {email}")
@@ -307,6 +281,8 @@ def register_account(email, password, proxy):
         code_field.clear()
         code_field.send_keys(code)
         logger.info(f"Код {code} введён")
+
+        wait_for_captcha(driver)
 
         continue_btn3 = wait.until(
             EC.element_to_be_clickable((By.CSS_SELECTOR, "button[type='submit']"))
@@ -334,12 +310,6 @@ def register_account(email, password, proxy):
     finally:
         if driver:
             driver.quit()
-        if proxy_extension_dir and os.path.exists(proxy_extension_dir):
-            try:
-                import shutil
-                shutil.rmtree(proxy_extension_dir)
-            except:
-                pass
 
 
 def read_accounts():
