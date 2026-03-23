@@ -3,7 +3,7 @@
 
 """
 Авторегистрация/автовход на chatgpt.com через Chromium с поддержкой HTTP/HTTPS прокси.
-При появлении капчи останавливается и ждёт ручного решения.
+При появлении капчи (включая Cloudflare) останавливается и ждёт ручного решения.
 Использует API Firstmail для получения кода.
 """
 
@@ -111,20 +111,31 @@ def save_debug_info(driver, prefix):
 
 
 def wait_for_captcha(driver):
-    """Проверяет наличие капчи и ждёт её ручного решения."""
+    """Проверяет наличие капчи (включая Cloudflare) и ждёт ручного решения."""
     try:
+        # Список индикаторов капчи (обычные + Cloudflare)
         captcha_indicators = [
             "//iframe[contains(@src, 'recaptcha')]",
+            "//iframe[contains(@src, 'challenges.cloudflare.com')]",
             "//div[@class='g-recaptcha']",
             "//div[contains(@class, 'captcha')]",
             "//div[contains(text(), 'captcha')]",
-            "//div[contains(text(), 'проверка')]"
+            "//div[contains(text(), 'проверка')]",
+            "//div[contains(text(), 'Checking your browser')]",
+            "//div[contains(text(), 'Please wait')]",
+            "//div[contains(text(), 'Cloudflare')]",
+            "//div[contains(text(), 'Ray ID')]",
+            "//button[contains(text(), 'Verify you are human')]",
+            "//input[@value='Verify you are human']",
+            "//div[@id='cf-challenge']",
+            "//div[@class='cf-browser-verification']"
         ]
         for xp in captcha_indicators:
             try:
                 elem = driver.find_element(By.XPATH, xp)
                 if elem.is_displayed():
-                    logger.warning("Обнаружена капча! Пожалуйста, решите её вручную в открытом браузере.")
+                    logger.warning("Обнаружена капча (возможно, Cloudflare)! Пожалуйста, решите её вручную в открытом браузере.")
+                    # Ждём, пока элемент исчезнет (капча решена)
                     while True:
                         try:
                             if not elem.is_displayed():
