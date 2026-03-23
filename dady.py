@@ -44,7 +44,6 @@ logger = logging.getLogger("AutoRegister")
 
 
 def get_verification_code_api(email_address, email_password, sender_domain="tm.openai.com", timeout=120):
-    """Получает код через API Firstmail."""
     headers = {
         "Authorization": f"Bearer {API_TOKEN}",
         "Content-Type": "application/json"
@@ -100,7 +99,6 @@ def get_verification_code_api(email_address, email_password, sender_domain="tm.o
 
 
 def save_debug_info(driver, prefix):
-    """Сохраняет скриншот и HTML при ошибке."""
     try:
         driver.save_screenshot(f"{prefix}_screenshot.png")
         with open(f"{prefix}_page.html", "w", encoding="utf-8") as f:
@@ -111,49 +109,73 @@ def save_debug_info(driver, prefix):
 
 
 def wait_for_captcha(driver):
-    """Проверяет наличие капчи (включая Cloudflare) и ждёт ручного решения."""
-    try:
-        # Список индикаторов капчи (обычные + Cloudflare)
-        captcha_indicators = [
-            "//iframe[contains(@src, 'recaptcha')]",
-            "//iframe[contains(@src, 'challenges.cloudflare.com')]",
-            "//div[@class='g-recaptcha']",
-            "//div[contains(@class, 'captcha')]",
-            "//div[contains(text(), 'captcha')]",
-            "//div[contains(text(), 'проверка')]",
-            "//div[contains(text(), 'Checking your browser')]",
-            "//div[contains(text(), 'Please wait')]",
-            "//div[contains(text(), 'Cloudflare')]",
-            "//div[contains(text(), 'Ray ID')]",
-            "//button[contains(text(), 'Verify you are human')]",
-            "//input[@value='Verify you are human']",
-            "//div[@id='cf-challenge']",
-            "//div[@class='cf-browser-verification']"
-        ]
-        for xp in captcha_indicators:
-            try:
-                elem = driver.find_element(By.XPATH, xp)
-                if elem.is_displayed():
-                    logger.warning("Обнаружена капча (возможно, Cloudflare)! Пожалуйста, решите её вручную в открытом браузере.")
-                    # Ждём, пока элемент исчезнет (капча решена)
-                    while True:
-                        try:
-                            if not elem.is_displayed():
-                                break
-                        except:
+    """
+    Обнаруживает капчу (включая Cloudflare) и ждёт ручного решения.
+    Возвращает True, если капча была и решена, иначе False.
+    """
+    # Проверяем URL на наличие индикаторов капчи
+    url = driver.current_url.lower()
+    captcha_url_indicators = ["captcha", "challenge", "error", "security"]
+    if any(ind in url for ind in captcha_url_indicators):
+        logger.warning(f"Обнаружена капча по URL: {url}")
+        captcha_present = True
+    else:
+        captcha_present = False
+
+    # Дополнительно ищем элементы на странице
+    xpath_list = [
+        "//iframe[contains(@src, 'recaptcha')]",
+        "//iframe[contains(@src, 'challenges.cloudflare.com')]",
+        "//div[@class='g-recaptcha']",
+        "//div[contains(@class, 'captcha')]",
+        "//div[contains(text(), 'captcha')]",
+        "//div[contains(text(), 'проверка')]",
+        "//div[contains(text(), 'Checking your browser')]",
+        "//div[contains(text(), 'Please wait')]",
+        "//div[contains(text(), 'Cloudflare')]",
+        "//div[contains(text(), 'Ray ID')]",
+        "//button[contains(text(), 'Verify you are human')]",
+        "//div[@id='cf-challenge']",
+        "//div[@class='cf-browser-verification']"
+    ]
+
+    for xp in xpath_list:
+        try:
+            elem = driver.find_element(By.XPATH, xp)
+            if elem.is_displayed():
+                captcha_present = True
+                break
+        except:
+            continue
+
+    if captcha_present:
+        logger.warning("Обнаружена капча! Пожалуйста, решите её вручную в открытом браузере.")
+        # Ждём, пока капча исчезнет
+        while True:
+            time.sleep(3)
+            # Проверяем URL
+            new_url = driver.current_url.lower()
+            if not any(ind in new_url for ind in captcha_url_indicators):
+                # Дополнительно проверяем, что капча-элементы пропали
+                captcha_still_there = False
+                for xp in xpath_list:
+                    try:
+                        elem = driver.find_element(By.XPATH, xp)
+                        if elem.is_displayed():
+                            captcha_still_there = True
                             break
-                        time.sleep(2)
+                    except:
+                        continue
+                if not captcha_still_there:
                     logger.info("Капча решена, продолжаем...")
-                    return True
-            except:
-                continue
-    except:
-        pass
+                    break
+            # Небольшая пауза после исчезновения, чтобы страница стабилизировалась
+        time.sleep(2)
+        return True
     return False
 
 
 def register_account(email, password, proxy):
-    """Регистрирует или входит в аккаунт."""
     driver = None
     try:
         options = webdriver.ChromeOptions()
@@ -178,9 +200,11 @@ def register_account(email, password, proxy):
 
         driver.get("https://chatgpt.com")
         logger.info("Открыта страница chatgpt.com")
-        wait = WebDriverWait(driver, 20)
-
+        # Проверка капчи после загрузки
         wait_for_captcha(driver)
+
+        # Ждём появления кнопки Log in (с запасом времени)
+        wait = WebDriverWait(driver, 20)
 
         # Нажать "Log in"
         login_clicked = False
@@ -205,6 +229,7 @@ def register_account(email, password, proxy):
             logger.warning("Не найдена кнопка Log in")
 
         time.sleep(2)
+        wait_for_captcha(driver)
 
         # Поле email
         try:
@@ -349,7 +374,6 @@ def main():
         logger.error("Установите requests: pip install requests")
         sys.exit(1)
 
-    # Запрос на использование прокси
     use_proxy = input("Использовать прокси? (y/n): ").strip().lower()
     proxies = []
     if use_proxy == 'y':
