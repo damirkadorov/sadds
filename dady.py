@@ -108,21 +108,13 @@ def save_debug_info(driver, prefix):
         logger.warning(f"Не удалось сохранить отладочные файлы: {e}")
 
 
-def wait_for_captcha(driver):
+def wait_for_captcha(driver, timeout=30):
     """
-    Обнаруживает капчу (включая Cloudflare) и ждёт ручного решения.
-    Возвращает True, если капча была и решена, иначе False.
+    Ожидает появления капчи (Cloudflare/reCAPTCHA) в течение timeout секунд.
+    Если капча появляется, ждёт её ручного решения и возвращает True.
+    Если за timeout капча не появилась, возвращает False.
     """
-    # Проверяем URL на наличие индикаторов капчи
-    url = driver.current_url.lower()
     captcha_url_indicators = ["captcha", "challenge", "error", "security"]
-    if any(ind in url for ind in captcha_url_indicators):
-        logger.warning(f"Обнаружена капча по URL: {url}")
-        captcha_present = True
-    else:
-        captcha_present = False
-
-    # Дополнительно ищем элементы на странице
     xpath_list = [
         "//iframe[contains(@src, 'recaptcha')]",
         "//iframe[contains(@src, 'challenges.cloudflare.com')]",
@@ -139,23 +131,36 @@ def wait_for_captcha(driver):
         "//div[@class='cf-browser-verification']"
     ]
 
-    for xp in xpath_list:
-        try:
-            elem = driver.find_element(By.XPATH, xp)
-            if elem.is_displayed():
-                captcha_present = True
-                break
-        except:
-            continue
+    start = time.time()
+    captcha_detected = False
 
-    if captcha_present:
+    while time.time() - start < timeout:
+        url = driver.current_url.lower()
+        # Проверяем URL
+        if any(ind in url for ind in captcha_url_indicators):
+            captcha_detected = True
+            break
+
+        # Проверяем элементы на странице
+        for xp in xpath_list:
+            try:
+                elem = driver.find_element(By.XPATH, xp)
+                if elem.is_displayed():
+                    captcha_detected = True
+                    break
+            except:
+                continue
+        if captcha_detected:
+            break
+        time.sleep(1)
+
+    if captcha_detected:
         logger.warning("Обнаружена капча! Пожалуйста, решите её вручную в открытом браузере.")
         # Ждём, пока капча исчезнет
         while True:
             time.sleep(3)
-            # Проверяем URL
-            new_url = driver.current_url.lower()
-            if not any(ind in new_url for ind in captcha_url_indicators):
+            url = driver.current_url.lower()
+            if not any(ind in url for ind in captcha_url_indicators):
                 # Дополнительно проверяем, что капча-элементы пропали
                 captcha_still_there = False
                 for xp in xpath_list:
@@ -169,7 +174,7 @@ def wait_for_captcha(driver):
                 if not captcha_still_there:
                     logger.info("Капча решена, продолжаем...")
                     break
-            # Небольшая пауза после исчезновения, чтобы страница стабилизировалась
+        # Небольшая пауза после исчезновения, чтобы страница стабилизировалась
         time.sleep(2)
         return True
     return False
@@ -200,10 +205,8 @@ def register_account(email, password, proxy):
 
         driver.get("https://chatgpt.com")
         logger.info("Открыта страница chatgpt.com")
-        # Проверка капчи после загрузки
-        wait_for_captcha(driver)
+        wait_for_captcha(driver, timeout=30)
 
-        # Ждём появления кнопки Log in (с запасом времени)
         wait = WebDriverWait(driver, 20)
 
         # Нажать "Log in"
@@ -229,7 +232,7 @@ def register_account(email, password, proxy):
             logger.warning("Не найдена кнопка Log in")
 
         time.sleep(2)
-        wait_for_captcha(driver)
+        wait_for_captcha(driver, timeout=30)
 
         # Поле email
         try:
@@ -245,7 +248,7 @@ def register_account(email, password, proxy):
         email_field.send_keys(email)
         logger.info(f"Email {email} введён")
 
-        wait_for_captcha(driver)
+        wait_for_captcha(driver, timeout=30)
 
         continue_btn = wait.until(
             EC.element_to_be_clickable((By.CSS_SELECTOR, "button[type='submit']"))
@@ -253,7 +256,7 @@ def register_account(email, password, proxy):
         continue_btn.click()
         logger.info("Нажата кнопка Continue (email)")
 
-        wait_for_captcha(driver)
+        wait_for_captcha(driver, timeout=30)
 
         # Проверка на уже зарегистрированный email
         try:
@@ -265,7 +268,7 @@ def register_account(email, password, proxy):
                 )
                 password_field.clear()
                 password_field.send_keys(password)
-                wait_for_captcha(driver)
+                wait_for_captcha(driver, timeout=30)
                 continue_btn2 = wait.until(
                     EC.element_to_be_clickable((By.CSS_SELECTOR, "button[type='submit']"))
                 )
@@ -286,7 +289,7 @@ def register_account(email, password, proxy):
         password_field.send_keys(password)
         logger.info("Пароль введён")
 
-        wait_for_captcha(driver)
+        wait_for_captcha(driver, timeout=30)
 
         continue_btn2 = wait.until(
             EC.element_to_be_clickable((By.CSS_SELECTOR, "button[type='submit']"))
@@ -294,7 +297,7 @@ def register_account(email, password, proxy):
         continue_btn2.click()
         logger.info("Нажата кнопка Continue (пароль)")
 
-        wait_for_captcha(driver)
+        wait_for_captcha(driver, timeout=30)
 
         code_field = wait.until(
             EC.presence_of_element_located((By.CSS_SELECTOR, "input[name='code']"))
@@ -310,7 +313,7 @@ def register_account(email, password, proxy):
         code_field.send_keys(code)
         logger.info(f"Код {code} введён")
 
-        wait_for_captcha(driver)
+        wait_for_captcha(driver, timeout=30)
 
         continue_btn3 = wait.until(
             EC.element_to_be_clickable((By.CSS_SELECTOR, "button[type='submit']"))
