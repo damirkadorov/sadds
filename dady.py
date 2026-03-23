@@ -2,7 +2,8 @@
 # -*- coding: utf-8 -*-
 
 """
-Авторегистрация/автовход на chatgpt.com через Chromium с прокси и API Firstmail.
+Авторегистрация/автовход на chatgpt.com через Chromium с поддержкой SOCKS5 прокси с авторизацией.
+Использует API Firstmail для получения кода подтверждения.
 """
 
 import sys
@@ -14,6 +15,8 @@ import re
 import requests
 import json
 import os
+import tempfile
+import zipfile
 
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -22,7 +25,7 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
 from selenium.webdriver.chrome.service import Service
 
-# ===================== НАСТРОЙКИ =====================
+# ===================== НАСТРОЙКИ (измените здесь) =====================
 EMAILS_FILE = "emails.txt"          # Файл с email:пароль (каждая строка)
 OUTPUT_FILE = "accounts.txt"        # Куда сохранять успешные аккаунты
 PROXIES_FILE = "proxy.txt"          # Файл с прокси (по одному на строку)
@@ -40,6 +43,105 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)]
 )
 logger = logging.getLogger("AutoRegister")
+
+
+def create_proxy_extension(proxy_string):
+    """
+    Создаёт временное расширение Chrome для авторизации SOCKS5 прокси.
+    Возвращает путь к каталогу расширения или None, если прокси не SOCKS5.
+    """
+    if not proxy_string.startswith('socks5://'):
+        return None
+
+    # Разбираем строку прокси: socks5://user:pass@host:port
+    rest = proxy_string[8:]  # убираем socks5://
+    if '@' in rest:
+        auth, host_port = rest.split('@', 1)
+        user, pwd = auth.split(':', 1)
+    else:
+        user, pwd = None, None
+        host_port = rest
+
+    if ':' in host_port:
+        host, port = host_port.split(':', 1)
+    else:
+        host = host_port
+        port = '1080'
+
+    # Создаём временный каталог для расширения
+    extension_dir = tempfile.mkdtemp()
+
+    # Манифест
+    manifest = {
+        "version": "1.0.0",
+        "manifest_version": 2,
+        "name": "Chrome Proxy",
+        "permissions": [
+            "proxy",
+            "tabs",
+            "unlimitedStorage",
+            "storage",
+            "<all_urls>",
+            "webRequest",
+            "webRequestBlocking"
+        ],
+        "background": {
+            "scripts": ["background.js"]
+        },
+        "minimum_chrome_version": "22.0.0"
+    }
+    with open(os.path.join(extension_dir, "manifest.json"), "w") as f:
+        json.dump(manifest, f)
+
+    # background.js
+    if user:
+        bg_js = f"""
+        var config = {{
+            mode: "fixed_servers",
+            rules: {{
+                singleProxy: {{
+                    scheme: "socks5",
+                    host: "{host}",
+                    port: parseInt({port})
+                }},
+                bypassList: ["localhost"]
+            }}
+        }};
+        chrome.proxy.settings.set({{value: config, scope: "regular"}}, function() {{}});
+        function callbackFn(details) {{
+            return {{
+                authCredentials: {{
+                    username: "{user}",
+                    password: "{pwd}"
+                }}
+            }};
+        }}
+        chrome.webRequest.onAuthRequired.addListener(
+            callbackFn,
+            {{urls: ["<all_urls>"]}},
+            ['blocking']
+        );
+        """
+    else:
+        bg_js = f"""
+        var config = {{
+            mode: "fixed_servers",
+            rules: {{
+                singleProxy: {{
+                    scheme: "socks5",
+                    host: "{host}",
+                    port: parseInt({port})
+                }},
+                bypassList: ["localhost"]
+            }}
+        }};
+        chrome.proxy.settings.set({{value: config, scope: "regular"}}, function() {{}});
+        """
+
+    with open(os.path.join(extension_dir, "background.js"), "w") as f:
+        f.write(bg_js)
+
+    return extension_dir
 
 
 def get_verification_code_api(email_address, email_password, sender_domain="tm.openai.com", timeout=120):
@@ -112,6 +214,7 @@ def save_debug_info(driver, prefix):
 def register_account(email, password, proxy):
     """Регистрирует или входит в аккаунт на chatgpt.com."""
     driver = None
+    proxy_extension_dir = None
     try:
         options = webdriver.ChromeOptions()
         options.add_argument("--disable-blink-features=AutomationControlled")
@@ -122,12 +225,20 @@ def register_account(email, password, proxy):
             options.add_argument("--no-sandbox")
             options.add_argument("--disable-dev-shm-usage")
         if proxy:
-            options.add_argument(f"--proxy-server={proxy}")
-            logger.info(f"Используется прокси: {proxy}")
+            # Пробуем создать расширение для SOCKS5 прокси с авторизацией
+            proxy_extension_dir = create_proxy_extension(proxy)
+            if proxy_extension_dir:
+                options.add_argument(f"--load-extension={proxy_extension_dir}")
+                logger.info(f"Используется прокси с расширением: {proxy}")
+            else:
+                # Если не SOCKS5 или без авторизации, используем стандартный метод
+                options.add_argument(f"--proxy-server={proxy}")
+                logger.info(f"Используется прокси (стандартный метод): {proxy}")
 
         service = Service("/usr/bin/chromedriver")
         driver = webdriver.Chrome(service=service, options=options)
 
+        # Отключаем WebDriver флаги
         driver.execute_script(
             "Object.defineProperty(navigator, 'webdriver', "
             "{get: () => undefined})"
@@ -161,11 +272,10 @@ def register_account(email, password, proxy):
 
         if not login_clicked:
             logger.warning("Не найдена кнопка Log in, пробуем искать форму напрямую")
-            # Возможно, форма уже открыта
 
         time.sleep(2)
 
-        # 3. Проверить, открылась ли форма email
+        # 3. Поле email
         try:
             email_field = wait.until(
                 EC.presence_of_element_located((By.CSS_SELECTOR, "input[name='email']"))
@@ -175,24 +285,22 @@ def register_account(email, password, proxy):
             save_debug_info(driver, "debug_no_email_field")
             return False
 
-        # 4. Ввести email
         email_field.clear()
         email_field.send_keys(email)
         logger.info(f"Email {email} введён")
 
-        # 5. Нажать "Continue" (первая кнопка отправки)
+        # 4. Нажать "Continue" (первая кнопка)
         continue_btn = wait.until(
             EC.element_to_be_clickable((By.CSS_SELECTOR, "button[type='submit']"))
         )
         continue_btn.click()
         logger.info("Нажата кнопка Continue (email)")
 
-        # 6. Проверить, не попали ли мы на страницу с ошибкой "email уже зарегистрирован"
+        # 5. Проверить, не попали ли мы на страницу с ошибкой "already registered"
         try:
             error_msg = driver.find_element(By.XPATH, "//div[contains(text(), 'already registered')]")
             if error_msg.is_displayed():
                 logger.info(f"Email {email} уже зарегистрирован, выполняется вход")
-                # В этом случае форма пароля уже должна появиться, просто вводим пароль
                 password_field = wait.until(
                     EC.presence_of_element_located((By.CSS_SELECTOR, "input[name='password']"))
                 )
@@ -204,7 +312,6 @@ def register_account(email, password, proxy):
                 continue_btn2.click()
                 logger.info("Нажата кнопка Continue (пароль) — выполнен вход")
                 time.sleep(3)
-                # Сохраняем аккаунт
                 with open(OUTPUT_FILE, "a", encoding="utf-8") as f:
                     f.write(f"{email}:{password}\n")
                 logger.info(f"Аккаунт {email} успешно авторизован и сохранён")
@@ -212,7 +319,7 @@ def register_account(email, password, proxy):
         except:
             pass
 
-        # 7. Если ошибки нет — это регистрация, ждём поле пароля
+        # 6. Регистрация: ждём поле пароля
         try:
             password_field = wait.until(
                 EC.presence_of_element_located((By.CSS_SELECTOR, "input[name='password']"))
@@ -226,14 +333,13 @@ def register_account(email, password, proxy):
         password_field.send_keys(password)
         logger.info("Пароль введён")
 
-        # 8. Нажать "Continue" после пароля
         continue_btn2 = wait.until(
             EC.element_to_be_clickable((By.CSS_SELECTOR, "button[type='submit']"))
         )
         continue_btn2.click()
         logger.info("Нажата кнопка Continue (пароль)")
 
-        # 9. Ждём поле для кода
+        # 7. Ждём поле для кода
         try:
             code_field = wait.until(
                 EC.presence_of_element_located((By.CSS_SELECTOR, "input[name='code']"))
@@ -245,18 +351,18 @@ def register_account(email, password, proxy):
 
         logger.info("Поле для кода появилось")
 
-        # 10. Получить код через API
+        # 8. Получить код через API
         code = get_verification_code_api(email, password, sender_domain="tm.openai.com", timeout=120)
         if not code:
             logger.error(f"Не удалось получить код для {email}")
             return False
 
-        # 11. Ввести код
+        # 9. Ввести код
         code_field.clear()
         code_field.send_keys(code)
         logger.info(f"Код {code} введён")
 
-        # 12. Нажать "Continue" после кода
+        # 10. Нажать "Continue" после кода
         continue_btn3 = wait.until(
             EC.element_to_be_clickable((By.CSS_SELECTOR, "button[type='submit']"))
         )
@@ -265,7 +371,6 @@ def register_account(email, password, proxy):
 
         time.sleep(3)
 
-        # Сохраняем успешный аккаунт
         with open(OUTPUT_FILE, "a", encoding="utf-8") as f:
             f.write(f"{email}:{password}\n")
         logger.info(f"Аккаунт {email} успешно зарегистрирован и сохранён в {OUTPUT_FILE}")
@@ -284,6 +389,12 @@ def register_account(email, password, proxy):
     finally:
         if driver:
             driver.quit()
+        if proxy_extension_dir and os.path.exists(proxy_extension_dir):
+            try:
+                import shutil
+                shutil.rmtree(proxy_extension_dir)
+            except:
+                pass
 
 
 def read_accounts():
