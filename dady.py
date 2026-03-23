@@ -113,7 +113,6 @@ def save_debug_info(driver, prefix):
 def wait_for_captcha(driver):
     """Проверяет наличие капчи и ждёт её ручного решения."""
     try:
-        # Ищем характерные элементы капчи (можно дополнить)
         captcha_indicators = [
             "//iframe[contains(@src, 'recaptcha')]",
             "//div[@class='g-recaptcha']",
@@ -126,7 +125,6 @@ def wait_for_captcha(driver):
                 elem = driver.find_element(By.XPATH, xp)
                 if elem.is_displayed():
                     logger.warning("Обнаружена капча! Пожалуйста, решите её вручную в открытом браузере.")
-                    # Ждём, пока капча исчезнет (пользователь решит)
                     while True:
                         try:
                             if not elem.is_displayed():
@@ -156,7 +154,6 @@ def register_account(email, password, proxy):
             options.add_argument("--no-sandbox")
             options.add_argument("--disable-dev-shm-usage")
         if proxy:
-            # Только HTTP/HTTPS прокси
             options.add_argument(f"--proxy-server={proxy}")
             logger.info(f"Используется прокси: {proxy}")
 
@@ -172,7 +169,6 @@ def register_account(email, password, proxy):
         logger.info("Открыта страница chatgpt.com")
         wait = WebDriverWait(driver, 20)
 
-        # Проверка капчи на начальной странице
         wait_for_captcha(driver)
 
         # Нажать "Log in"
@@ -213,7 +209,6 @@ def register_account(email, password, proxy):
         email_field.send_keys(email)
         logger.info(f"Email {email} введён")
 
-        # Проверка капчи после ввода email
         wait_for_captcha(driver)
 
         continue_btn = wait.until(
@@ -222,7 +217,6 @@ def register_account(email, password, proxy):
         continue_btn.click()
         logger.info("Нажата кнопка Continue (email)")
 
-        # Проверка капчи после нажатия
         wait_for_captcha(driver)
 
         # Проверка на уже зарегистрированный email
@@ -264,7 +258,6 @@ def register_account(email, password, proxy):
         continue_btn2.click()
         logger.info("Нажата кнопка Continue (пароль)")
 
-        # Проверка капчи перед кодом
         wait_for_captcha(driver)
 
         code_field = wait.until(
@@ -272,7 +265,6 @@ def register_account(email, password, proxy):
         )
         logger.info("Поле для кода появилось")
 
-        # Получаем код из API
         code = get_verification_code_api(email, password, sender_domain="tm.openai.com", timeout=120)
         if not code:
             logger.error(f"Не удалось получить код для {email}")
@@ -329,16 +321,13 @@ def read_accounts():
 
 def read_proxies():
     proxies = []
-    if PROXIES_FILE:
-        try:
-            with open(PROXIES_FILE, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if line:
-                        proxies.append(line)
-        except FileNotFoundError:
-            logger.error(f"Файл {PROXIES_FILE} не найден!")
-            sys.exit(1)
+    if not os.path.exists(PROXIES_FILE):
+        return proxies
+    with open(PROXIES_FILE, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                proxies.append(line)
     return proxies
 
 
@@ -349,12 +338,22 @@ def main():
         logger.error("Установите requests: pip install requests")
         sys.exit(1)
 
+    # Запрос на использование прокси
+    use_proxy = input("Использовать прокси? (y/n): ").strip().lower()
+    proxies = []
+    if use_proxy == 'y':
+        proxies = read_proxies()
+        if not proxies:
+            logger.warning("Файл с прокси пуст или не найден. Работаем без прокси.")
+        else:
+            logger.info(f"Загружено {len(proxies)} прокси")
+    else:
+        logger.info("Работаем без прокси")
+
     accounts = read_accounts()
     if not accounts:
         logger.error("Файл с аккаунтами пуст или имеет неверный формат.")
         sys.exit(1)
-
-    proxies = read_proxies()
 
     tasks = queue.Queue()
     for i, (email, pwd) in enumerate(accounts):
